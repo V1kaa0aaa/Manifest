@@ -1,0 +1,131 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: highload-app
+  labels:
+    app: highload-app
+spec:
+  # У нас 4 пода выдерживают пик нагрузки 
+  replicas: 4
+  
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1        # Создаем 1 лишний под на время обновления, чтобы не было момента, когда у нас между обновлениями остается 3 пода
+      maxUnavailable: 0  # Условие, что нельзя выключать старые поды, пока новые не готовы
+  
+  #Ставим метку для подов
+  selector:
+    matchLabels:
+      app: highload-app
+  
+  template:
+    metadata:
+      labels:
+        app: highload-app
+    spec:
+      #Деление на зоны 
+      topologySpreadConstraints:
+        - maxSkew: 1                                    # Устанавливаем разницу между зонами не больше 1 пода
+          topologyKey: topology.kubernetes.io/zone      # Группируем по зонам
+          whenUnsatisfiable: DoNotSchedule              # 
+          labelSelector:
+            matchLabels:
+              app: highload-app
+      
+      # Устанавливаем правило распределения подов нельзя поставить два пода с меткой highload-app на одну и ту же ноду
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: highload-app      # Ищем поды этого же приложения
+              topologyKey: kubernetes.io/hostname   # Ставим запрет на уровне ноды
+      
+      # Контейнер в поде
+      containers:
+        - name: app
+          image: my-registry/highload-app:latest
+          
+          # Ресурсы для контейнера
+          resources:
+            requests:
+              cpu: "100m"      # Ставим гарантированно 0.1 ядра 
+              memory: "128Mi"  # По памяти устанавливаем всегда ровно
+            limits:
+              cpu: "800m"      # Можно до 0.8 ядра на время инициализации
+              memory: "256Mi"  # небольшой запас
+          
+          # Проверка, что приложение запустилось
+          # Даём 30 секунд на инициализацию (приложение грузится 5-10 секунд)
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            failureThreshold: 6    # 6 попыток
+            periodSeconds: 5       # каждые 5 секунд = 30 секунд всего
+          
+          # Проверка, что под готов принимать трафик
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            periodSeconds: 10
+          
+          # Провепка, что процесс не завис
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          
+          # Порт приложения
+          ports:
+            - containerPort: 8080
+              name: http
+          
+          # Даём 30 секунд на graceful shutdown
+          terminationGracePeriodSeconds: 30
+
+---
+# Автоматическое масштабирование
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler # Автоматически меняет replicas в Deployment
+metadata:
+  name: highload-app-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: highload-app
+  
+  minReplicas: 2      # Ночью достаточно 2 подов
+  maxReplicas: 4      # Eсли вдруг нагрузки больше, то увеличиваем
+  
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 65   # Будем держать загрузку CPU около 65%, это будет нашим критерием для балансировании нагрузки
+  
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600   # Ждём 10 минут перед уменьшением 
+    scaleUp:
+      stabilizationWindowSeconds: 30    # При росте реагируем за 10 секунд
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: highload-app-svc
+spec:
+  selector:
+    app: highload-app
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: ClusterIP
