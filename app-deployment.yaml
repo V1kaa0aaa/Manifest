@@ -34,7 +34,7 @@ spec:
             matchLabels:
               app: highload-app
       
-      # Устанавливаем правило распределения подов нельзя поставить два пода с меткой highload-app на одну и ту же ноду
+      # Устанавливаем правило распределения подов, о том что нельзя поставить два пода с меткой highload-app на одну и ту же ноду
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
